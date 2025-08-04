@@ -5,12 +5,14 @@ This is a bridge toward using external caching services like AWS ElasticCache.
 
 import asyncio
 import functools
+import hashlib
 import os
 import time
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from app.api.schemas.cached_user import CachedUser
 from app.core.logger import get_logger
@@ -155,13 +157,18 @@ async_user_cache: "AsyncCache" = _AsyncBackend(ttl_seconds=300)  # 5-min TTL
 async_provider_service_cache: "AsyncCache" = _AsyncBackend(
     ttl_seconds=3600
 )  # 1-hour TTL
+# OAuth2 token caching (no TTL - uses token's own expiration with smart cleanup)
+async_oauth_token_cache: "AsyncCache" = _AsyncBackend(ttl_seconds=None)
 
 
 # User-specific functions
 async def get_cached_user_async(api_key: str) -> CachedUser | None:
-    """Get a user from cache by API key asynchronously"""
+    """Get a user from cache by Forge API key asynchronously"""
     if not api_key:
         return None
+    # Remove the forge- prefix for caching from the API key
+    if api_key.startswith("forge-"):
+        api_key = api_key[6:]
     cached_data = await async_user_cache.get(f"user:{api_key}")
     if cached_data:
         return CachedUser.model_validate(cached_data)
@@ -169,18 +176,47 @@ async def get_cached_user_async(api_key: str) -> CachedUser | None:
 
 
 async def cache_user_async(api_key: str, user: User) -> None:
-    """Cache a user by API key asynchronously"""
+    """Cache a user by Forge API key asynchronously"""
     if not api_key or user is None:
         return
     cached_user = CachedUser.model_validate(user)
+    # Remove the forge- prefix for caching from the API key
+    if api_key.startswith("forge-"):
+        api_key = api_key[6:]
     await async_user_cache.set(f"user:{api_key}", cached_user.model_dump())
 
 
 async def invalidate_user_cache_async(api_key: str) -> None:
-    """Invalidate user cache for a specific API key asynchronously"""
+    """Invalidate user cache for a specific Forge API key asynchronously"""
     if not api_key:
         return
+    # Remove the forge- prefix for caching from the API key
+    if api_key.startswith("forge-"):
+        api_key = api_key[6:]
     await async_user_cache.delete(f"user:{api_key}")
+
+
+async def invalidate_forge_scope_cache_async(api_key: str) -> None:
+    """Invalidate forge scope cache for a specific API key asynchronously.
+    
+    Args:
+        api_key (str): The API key to invalidate cache for. Can include or exclude 'forge-' prefix.
+    """
+    if not api_key:
+        return
+    
+    # The cache key format uses the API key WITHOUT the "forge-" prefix
+    # to match how it's set in get_user_by_api_key()
+    cache_key = api_key
+    if cache_key.startswith("forge-"):
+        cache_key = cache_key[6:]  # Remove "forge-" prefix to match cache setting format
+    
+    await async_provider_service_cache.delete(f"forge_scope:{cache_key}")
+    
+    if DEBUG_CACHE:
+        # Mask the API key for logging
+        masked_key = cache_key[:8] + "..." if len(cache_key) > 8 else cache_key
+        logger.debug(f"Cache: Invalidated forge scope cache for API key: {masked_key} (async)")
 
 
 async def invalidate_user_cache_by_id_async(user_id: int) -> None:
@@ -223,6 +259,51 @@ async def invalidate_user_cache_by_id_async(user_id: int) -> None:
         if DEBUG_CACHE:
             logger.debug(f"Cache: Invalidated user cache for key: {key[:8]}...")
 
+async def get_forge_scope_cache_async(api_key: str) -> list[str] | None:
+    """Get the forge scope cache for a specific Forge API key asynchronously"""
+    if not api_key:
+        return None
+    # Remove the forge- prefix for caching from the API key
+    cache_key = api_key
+    if cache_key.startswith("forge-"):
+        cache_key = cache_key[6:]
+    return await async_provider_service_cache.get(f"forge_scope:{cache_key}")
+
+
+async def forge_scope_cache_async(api_key: str, allowed_provider_names: list[str], ttl: int = 300) -> None:
+    """Cache the forge scope cache for a specific Forge API key asynchronously"""
+    if not api_key:
+        return None
+    # Remove the forge- prefix for caching from the API key
+    cache_key = api_key
+    if cache_key.startswith("forge-"):
+        cache_key = cache_key[6:]
+    await async_provider_service_cache.set(f"forge_scope:{cache_key}", allowed_provider_names, ttl=ttl)
+    if DEBUG_CACHE:
+        # Mask the API key for logging
+        masked_key = cache_key[:8] + "..." if len(cache_key) > 8 else cache_key
+        logger.debug(f"Cache: set forge scope cache for Forge API key: {masked_key} (async)")
+
+
+async def invalidate_forge_scope_cache_async(api_key: str) -> None:
+    """Invalidate forge scope cache for a specific API key asynchronously.
+    
+    Args:
+        api_key (str): The API key to invalidate cache for. Can include or exclude 'forge-' prefix.
+    """
+    if not api_key:
+        return
+    
+    cache_key = api_key
+    if cache_key.startswith("forge-"):
+        cache_key = cache_key[6:]  # Remove "forge-" prefix to match cache setting format
+    
+    await async_provider_service_cache.delete(f"forge_scope:{cache_key}")
+    
+    if DEBUG_CACHE:
+        # Mask the API key for logging
+        masked_key = cache_key[:8] + "..." if len(cache_key) > 8 else cache_key
+        logger.debug(f"Cache: Invalidated forge scope cache for Forge API key: {masked_key} (async)")
 
 # Provider service functions
 async def get_cached_provider_service_async(user_id: int) -> Any:
@@ -256,6 +337,98 @@ async def invalidate_provider_service_cache_async(user_id: int) -> None:
         logger.debug(
             f"Cache: Cleared provider service, keys, and models caches for user {user_id} (async)"
         )
+
+
+# OAuth2 token caching functions
+async def get_cached_oauth_token_async(api_key: str) -> dict[str, Any] | None:
+    """Get a cached OAuth2 token by API key asynchronously"""
+    if not api_key:
+        return None
+    
+    cache_key = f"token:{hashlib.sha256(api_key.encode()).hexdigest()}"
+    cached_data = await async_oauth_token_cache.get(cache_key)
+    if not cached_data:
+        return None
+    
+    expires_at = cached_data.get("expires_at")
+    if not expires_at:
+        await async_oauth_token_cache.delete(cache_key)
+        return None
+    
+    current_time = time.time()
+    if expires_at <= current_time:
+        await async_oauth_token_cache.delete(cache_key)
+        await _opportunistic_cleanup(current_time, max_items=2)
+        return None
+    
+    return cached_data
+
+
+async def cache_oauth_token_async(api_key: str, token_data: dict[str, Any]) -> None:
+    """Cache an OAuth2 token by API key asynchronously"""
+    if not api_key or not token_data:
+        return
+    
+    cache_key = f"token:{hashlib.sha256(api_key.encode()).hexdigest()}"
+    if "expires_at" not in token_data:
+        logger.warning("OAuth token cached without expires_at - skipping")
+        return
+    
+    await async_oauth_token_cache.set(cache_key, token_data)
+
+
+async def invalidate_oauth_token_cache_async(api_key: str) -> None:
+    """Invalidate OAuth2 token cache for a specific API key asynchronously"""
+    if not api_key:
+        return
+    
+    cache_key = f"token:{hashlib.sha256(api_key.encode()).hexdigest()}"
+    await async_oauth_token_cache.delete(cache_key)
+    if DEBUG_CACHE:
+        logger.debug(f"Cache: Invalidated OAuth2 token cache for key: {cache_key[:16]}...")
+
+
+async def _opportunistic_cleanup(current_time: float, max_items: int = 2) -> None:
+    """Opportunistically clean up expired OAuth tokens from cache"""
+    cleaned = 0
+    
+    # Case 1: in-memory backend exposes .cache dict
+    if hasattr(async_oauth_token_cache, "cache"):
+        async with async_oauth_token_cache.lock:
+            for key, value in list(async_oauth_token_cache.cache.items()):
+                if cleaned >= max_items:
+                    break
+                if key.startswith("token:"):
+                    expires_at = value.get("expires_at")
+                    if expires_at and expires_at <= current_time:
+                        await async_oauth_token_cache.delete(key)
+                        cleaned += 1
+                        if DEBUG_CACHE:
+                            logger.debug(f"Cache: Cleaned up expired token: {key[:16]}...")
+    
+    # Case 2: Redis backend
+    elif hasattr(async_oauth_token_cache, "client"):
+        try:
+            pattern = f"{os.getenv('REDIS_PREFIX', 'forge')}:token:*"
+            async for redis_key in async_oauth_token_cache.client.scan_iter(match=pattern, count=10):
+                if cleaned >= max_items:
+                    break
+                key_str = redis_key.decode() if isinstance(redis_key, bytes) else redis_key
+                internal_key = key_str.split(":", 1)[-1]
+                cached_data = await async_oauth_token_cache.get(internal_key)
+                if cached_data:
+                    expires_at = cached_data.get("expires_at")
+                    if expires_at and expires_at <= current_time:
+                        await async_oauth_token_cache.delete(internal_key)
+                        cleaned += 1
+                        if DEBUG_CACHE:
+                            logger.debug(f"Cache: Cleaned up expired token: {internal_key[:16]}...")
+        except Exception as exc:
+            if DEBUG_CACHE:
+                logger.warning(f"Failed to perform opportunistic cleanup: {exc}")
+    
+    if DEBUG_CACHE and cleaned > 0:
+        logger.debug(f"Cache: Opportunistic cleanup removed {cleaned} expired tokens")
 
 
 async def invalidate_provider_models_cache_async(provider_name: str) -> None:
@@ -309,12 +482,13 @@ async def invalidate_all_caches_async() -> None:
     """Invalidate all caches in the system asynchronously"""
     await async_user_cache.clear()
     await async_provider_service_cache.clear()
+    await async_oauth_token_cache.clear()
 
     if DEBUG_CACHE:
         logger.debug("Cache: Invalidated all caches")
 
 
-async def warm_cache_async(db: Session) -> None:
+async def warm_cache_async(db: AsyncSession) -> None:
     """Pre-cache frequently accessed data asynchronously"""
     from app.models.user import User
     from app.services.provider_service import ProviderService
@@ -323,16 +497,18 @@ async def warm_cache_async(db: Session) -> None:
         logger.info("Cache: Starting cache warm-up...")
 
     # Cache active users
-    active_users = db.query(User).filter(User.is_active).all()
+    result = await db.execute(select(User).filter(User.is_active))
+    active_users = result.scalars().all()
+    
     for user in active_users:
         # Get user's Forge API keys
-        forge_api_keys = (
-            db.query(ForgeApiKey)
+        result = await db.execute(
+            select(ForgeApiKey)
             .filter(ForgeApiKey.user_id == user.id, ForgeApiKey.is_active)
-            .all()
         )
+        forge_api_keys = result.scalars().all()
+        
         for key in forge_api_keys:
-            # Cache user with their Forge API key
             await cache_user_async(key.key, user)
 
     # Cache provider services for active users
@@ -349,6 +525,7 @@ async def get_cache_stats_async() -> dict[str, dict[str, Any]]:
     return {
         "user_cache": await async_user_cache.stats(),
         "provider_service_cache": await async_provider_service_cache.stats(),
+        "oauth_token_cache": await async_oauth_token_cache.stats(),
     }
 
 
@@ -357,9 +534,15 @@ async def monitor_cache_performance_async() -> dict[str, Any]:
     stats = await get_cache_stats_async()
 
     # Calculate overall hit rates
-    total_hits = stats["user_cache"]["hits"] + stats["provider_service_cache"]["hits"]
+    total_hits = (
+        stats["user_cache"]["hits"]
+        + stats["provider_service_cache"]["hits"]
+        + stats["oauth_token_cache"]["hits"]
+    )
     total_requests = (
-        stats["user_cache"]["total"] + stats["provider_service_cache"]["total"]
+        stats["user_cache"]["total"]
+        + stats["provider_service_cache"]["total"]
+        + stats["oauth_token_cache"]["total"]
     )
     overall_hit_rate = total_hits / total_requests if total_requests > 0 else 0.0
 

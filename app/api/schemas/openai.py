@@ -1,6 +1,11 @@
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+from app.core.logger import get_logger
+from app.exceptions.exceptions import InvalidCompletionRequestException
+
+logger = get_logger(name="openai_schemas")
 
 
 class OpenAIContentImageUrlModel(BaseModel):
@@ -21,23 +26,94 @@ class OpenAIContentModel(BaseModel):
     def __init__(self, **data: Any):
         super().__init__(**data)
         if self.type not in ["text", "image_url", "input_audio"]:
-            raise ValueError(
-                f"Invalid type: {self.type}. Must be one of: text, image_url, input_audio"
+            error_message = f"Invalid type: {self.type}. Must be one of: text, image_url, input_audio"
+            logger.error(error_message)
+            raise InvalidCompletionRequestException(
+                provider_name="openai",
+                error=ValueError(error_message)
             )
 
         # Validate that the appropriate field is set based on type
         if self.type == "text" and self.text is None:
-            raise ValueError("text field must be set when type is 'text'")
+            error_message = "text field must be set when type is 'text'"
+            logger.error(error_message)
+            raise InvalidCompletionRequestException(
+                provider_name="openai",
+                error=ValueError(error_message)
+            )
         if self.type == "image_url" and self.image_url is None:
-            raise ValueError("image_url field must be set when type is 'image_url'")
+            error_message = "image_url field must be set when type is 'image_url'"
+            logger.error(error_message)
+            raise InvalidCompletionRequestException(
+                provider_name="openai",
+                error=ValueError(error_message)
+            )
         if self.type == "input_audio" and self.input_audio is None:
-            raise ValueError("input_audio field must be set when type is 'input_audio'")
+            error_message = "input_audio field must be set when type is 'input_audio'"
+            logger.error(error_message)
+            raise InvalidCompletionRequestException(
+                provider_name="openai",
+                error=ValueError(error_message)
+            )
+
+
+# ---------------------------------------------------------------------------
+# OpenAI tool call models (for function calling / tool usage)
+# ---------------------------------------------------------------------------
+
+
+class OpenAIToolCallFunctionModel(BaseModel):
+    """Represents the function part inside a tool call record."""
+
+    name: str
+    # According to the OpenAI specification this is a JSON string, but users often
+    # pass a structured object.  Accept both for leniency.
+    arguments: Any
+
+
+class OpenAIToolCallModel(BaseModel):
+    """Represents a single tool call entry returned by the assistant."""
+
+    id: str
+    type: str
+    function: OpenAIToolCallFunctionModel
 
 
 class ChatMessage(BaseModel):
+    """OpenAI-compatible chat message.
+
+    Forge aims to stay 100 % compatible with the OpenAI Chat Completions API.  We
+    therefore mirror the message schema defined by OpenAI, while being liberal
+    in what we accept so that users can reuse the exact same payloads they send
+    to `api.openai.com`.
+    """
+
     role: str
-    content: list[OpenAIContentModel] | str
+    content: list[OpenAIContentModel] | str | None = None
     name: str | None = None
+
+    # Fields for function calling / tool usage.  They are optional and ignored
+    # by most providers, but we must parse (and forward) them to remain API-
+    # compatible.
+    tool_calls: list[OpenAIToolCallModel] | None = None
+    tool_call_id: str | None = None
+
+    # Future-proofing: allow any extra keys that OpenAI may introduce without
+    # breaking existing clients.
+    class Config:
+        extra = "allow"
+
+    # ---------------------------------------------------------------------
+    # Validators
+    # ---------------------------------------------------------------------
+
+    @classmethod
+    def _allow_null_content(cls, v):  # noqa: D401, ANN001
+        """Return the value as-is so that **null** is accepted without errors."""
+        return v
+
+    # Pydantic v2
+    _validate_content = field_validator("content", mode="before")(_allow_null_content)
 
 
 class ChatCompletionRequest(BaseModel):
@@ -64,7 +140,7 @@ class ChatCompletionRequest(BaseModel):
     stream: bool | None = False
     stream_options: object | None = None
     temperature: float | None = 1.0
-    tool_choice: str | None = None
+    tool_choice: str | dict[Any, Any] | None = None
     tools: list[Any] | None = None
     top_logprobs: int | None = None
     top_p: float | None = 1.0

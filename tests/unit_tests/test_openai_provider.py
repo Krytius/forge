@@ -14,21 +14,26 @@ from tests.unit_tests.utils.helpers import (
 
 CURRENT_DIR = os.path.dirname(__file__)
 
-with open(os.path.join(CURRENT_DIR, "docs", "openai", "list_models.json"), "r") as f:
+with open(os.path.join(CURRENT_DIR, "assets", "openai", "list_models.json"), "r") as f:
     MOCK_LIST_MODELS_RESPONSE_DATA = json.load(f)
 
 with open(
-    os.path.join(CURRENT_DIR, "docs", "openai", "chat_completion_response_1.json"), "r"
+    os.path.join(CURRENT_DIR, "assets", "openai", "chat_completion_response_1.json"), "r"
 ) as f:
     MOCK_CHAT_COMPLETION_RESPONSE_DATA = json.load(f)
 
 with open(
     os.path.join(
-        CURRENT_DIR, "docs", "openai", "chat_completion_streaming_response_1.json"
+        CURRENT_DIR, "assets", "openai", "chat_completion_streaming_response_1.json"
     ),
     "r",
 ) as f:
     MOCK_CHAT_COMPLETION_STREAMING_RESPONSE_DATA = json.load(f)
+
+with open(
+    os.path.join(CURRENT_DIR, "assets", "openai", "embeddings_response.json"), "r"
+) as f:
+    MOCK_EMBEDDINGS_RESPONSE_DATA = json.load(f)
 
 
 class TestOpenAIProvider(TestCase):
@@ -108,3 +113,20 @@ class TestOpenAIProvider(TestCase):
                 expected_model="gpt-4o-mini-2024-07-18",
                 expected_message=OPENAAI_STANDARD_CHAT_COMPLETION_RESPONSE,
             )
+
+    async def test_process_embeddings(self):
+        payload = {
+            "model": "text-embedding-ada-002",
+            "input": ["hello", "world"],
+        }
+        with patch("aiohttp.ClientSession", ClientSessionMock()) as mock_session:
+            mock_session.responses = [(MOCK_EMBEDDINGS_RESPONSE_DATA, 200)]
+
+            # Call the method
+            result = await self.adapter.process_embeddings(
+                api_key=self.api_key, payload=payload, endpoint="embeddings"
+            )
+            self.assertEqual(result, MOCK_EMBEDDINGS_RESPONSE_DATA)
+
+            # verify that the payload sent to openai has a list as input
+            self.assertIsInstance(mock_session.posted_json[0]["input"], list)

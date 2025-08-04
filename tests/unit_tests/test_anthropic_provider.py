@@ -14,18 +14,18 @@ from tests.unit_tests.utils.helpers import (
 
 CURRENT_DIR = os.path.dirname(__file__)
 
-with open(os.path.join(CURRENT_DIR, "docs", "anthropic", "list_models.json"), "r") as f:
+with open(os.path.join(CURRENT_DIR, "assets", "anthropic", "list_models.json"), "r") as f:
     MOCK_LIST_MODELS_RESPONSE_DATA = json.load(f)
 
 with open(
-    os.path.join(CURRENT_DIR, "docs", "anthropic", "chat_completion_response_1.json"),
+    os.path.join(CURRENT_DIR, "assets", "anthropic", "chat_completion_response_1.json"),
     "r",
 ) as f:
     MOCK_CHAT_COMPLETION_RESPONSE_DATA = json.load(f)
 
 with open(
     os.path.join(
-        CURRENT_DIR, "docs", "anthropic", "chat_completion_streaming_response_1.json"
+        CURRENT_DIR, "assets", "anthropic", "chat_completion_streaming_response_1.json"
     ),
     "r",
 ) as f:
@@ -80,7 +80,6 @@ class TestAnthropicProvider(TestCase):
                 "messages": [{"role": "user", "content": "Hello, how are you?"}],
                 "max_tokens": 4096,
                 "temperature": 1.0,
-                "stop_sequences": [],
             }
 
     async def test_chat_completion_streaming(self):
@@ -113,6 +112,5 @@ class TestAnthropicProvider(TestCase):
                 "messages": [{"role": "user", "content": "Hello, how are you?"}],
                 "max_tokens": 4096,
                 "temperature": 1.0,
-                "stop_sequences": [],
                 "stream": True,
             }

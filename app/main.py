@@ -3,7 +3,7 @@ import time
 from collections.abc import Callable
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, FastAPI, Request
+from fastapi import APIRouter, FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -11,6 +11,8 @@ from app.api.routes import (
     api_auth,
     api_keys,
     auth,
+    health,
+    claude_code,
     provider_keys,
     proxy,
     stats,
@@ -20,6 +22,8 @@ from app.api.routes import (
 from app.core.database import engine
 from app.core.logger import get_logger
 from app.models.base import Base
+from app.exceptions.exceptions import ProviderAuthenticationException, InvalidProviderException, BaseInvalidProviderSetupException, \
+    ProviderAPIException, BaseInvalidRequestException, BaseInvalidForgeKeyException
 
 load_dotenv()
 
@@ -65,76 +69,128 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         return response
 
 
-# Get environment
-is_production = os.getenv("ENVIRONMENT", "development").lower() == "production"
+# Exception handlers
+class ForgeExceptionHandler:
+    """Custom exception handlers for Forge-specific errors."""
 
-app = FastAPI(
-    title="Forge API",
-    description="A middleware service for managing AI model provider API keys",
-    version="0.1.0",
-    docs_url="/docs" if not is_production else None,
-    redoc_url="/redoc" if not is_production else None,
-    openapi_url="/openapi.json" if not is_production else None,
-)
+    @staticmethod
+    async def handle_provider_auth_exception(request: Request, exc: ProviderAuthenticationException):
+        logger.warning(f"Provider authentication failed: {exc.detail}")
+        return HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+            headers=exc.headers or {}
+        )
+
+    @staticmethod
+    async def handle_invalid_provider_exception(request: Request, exc: InvalidProviderException):
+        logger.warning(f"Invalid provider: {exc.detail}")
+        return HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+            headers=exc.headers or {}
+        )
+
+    @staticmethod
+    async def handle_base_invalid_provider_setup_exception(request: Request, exc: BaseInvalidProviderSetupException):
+        logger.warning(f"Invalid provider setup: {exc.detail}")
+        return HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+            headers=exc.headers or {}
+        )
+
+    @staticmethod
+    async def handle_provider_api_exception(request: Request, exc: ProviderAPIException):
+        logger.error(f"Provider API error: {exc.detail}")
+        return HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+            headers=exc.headers or {}
+        )
+
+    @staticmethod
+    async def handle_base_invalid_request_exception(request: Request, exc: BaseInvalidRequestException):
+        logger.warning(f"Invalid request: {exc.detail}")
+        return HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+            headers=exc.headers or {}
+        )
+
+    @staticmethod
+    async def handle_base_invalid_forge_key_exception(request: Request, exc: BaseInvalidForgeKeyException):
+        logger.warning(f"Invalid Forge key: {exc.detail}")
+        return HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+            headers=exc.headers or {}
+        )
 
 
-# Middleware to log slow requests
-@app.middleware("http")
-async def log_latency(request: Request, call_next):
-    start_time = (
-        time.time()
-    )  # Renamed from start to avoid conflict with existing start_time
-    try:
-        response = await call_next(request)
-        return response
-    finally:
-        duration = time.time() - start_time
-        if duration > SLOW_REQUEST_THRESHOLD_SECONDS:  # More than the defined threshold
-            logger.warning(
-                f"[SLOW] {request.method} {request.url.path} took {duration:.2f}s"
-            )
+def create_app() -> FastAPI:
+    """Create and configure the FastAPI application."""
+    app = FastAPI(
+        title="Forge API",
+        description="Unified AI model provider API",
+        version="0.1.0",
+        docs_url="/docs",
+        redoc_url="/redoc",
+    )
+
+    # Add CORS middleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # Configure appropriately for production
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # Add request logging middleware
+    app.add_middleware(RequestLoggingMiddleware)
+
+    # Add exception handlers
+    app.add_exception_handler(ProviderAuthenticationException, ForgeExceptionHandler.handle_provider_auth_exception)
+    app.add_exception_handler(InvalidProviderException, ForgeExceptionHandler.handle_invalid_provider_exception)
+    app.add_exception_handler(BaseInvalidProviderSetupException, ForgeExceptionHandler.handle_base_invalid_provider_setup_exception)
+    app.add_exception_handler(ProviderAPIException, ForgeExceptionHandler.handle_provider_api_exception)
+    app.add_exception_handler(BaseInvalidRequestException, ForgeExceptionHandler.handle_base_invalid_request_exception)
+    app.add_exception_handler(BaseInvalidForgeKeyException, ForgeExceptionHandler.handle_base_invalid_forge_key_exception)
+
+    # Include routers
+    v1_router.include_router(auth.router, prefix="/auth", tags=["authentication"])
+    v1_router.include_router(api_auth.router, prefix="/api-auth", tags=["api-authentication"])
+    v1_router.include_router(users.router, prefix="/users", tags=["users"])
+    v1_router.include_router(provider_keys.router, prefix="/provider-keys", tags=["provider-keys"])
+    v1_router.include_router(api_keys.router, prefix="/api-keys", tags=["api-keys"])
+    v1_router.include_router(proxy.router, tags=["proxy"])
+    v1_router.include_router(stats.router, prefix="/stats", tags=["stats"])
+    v1_router.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
+    # Claude Code compatible API endpoints
+    v1_router.include_router(claude_code.router, tags=["Claude Code API"])
+
+    # Health check routes (not versioned)
+    app.include_router(health.router, tags=["health"])
+    
+    # Include v1 router
+    app.include_router(v1_router)
+
+    @app.get("/")
+    async def root():
+        """Root endpoint with API information."""
+        return {
+            "message": "Welcome to Forge API",
+            "version": "0.1.0",
+            "docs": "/docs",
+            "health": "/health"
+        }
+
+    return app
 
 
-# Add request logging middleware
-app.add_middleware(RequestLoggingMiddleware)
-
-# Configure CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # For production, specify the actual origins
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Include routers under v1 prefix
-v1_router.include_router(auth.router, prefix="/auth", tags=["Authentication"])
-v1_router.include_router(users.router, prefix="/users", tags=["Users"])
-v1_router.include_router(
-    provider_keys.router, prefix="/provider-keys", tags=["Provider Keys"]
-)
-v1_router.include_router(stats.router, prefix="/stats", tags=["Usage Statistics"])
-v1_router.include_router(webhooks.router, prefix="/webhooks", tags=["Webhooks"])
-v1_router.include_router(api_auth.router, prefix="/api", tags=["Unified API"])
-v1_router.include_router(api_keys.router, prefix="/api-keys", tags=["API Keys"])
-
-# OpenAI-compatible API endpoints
-v1_router.include_router(proxy.router, tags=["OpenAI API"])
-
-# Include v1 router in main app
-app.include_router(v1_router)
-
-
-@app.get("/")
-def read_root():
-    response = {
-        "name": "Forge API",
-        "version": "0.1.0",
-        "description": "A middleware service for managing AI model provider API keys",
-    }
-    if not is_production:
-        response["documentation"] = "/docs"
-    return response
+# Create the application instance
+app = create_app()
 
 
 if __name__ == "__main__":

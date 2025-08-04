@@ -19,7 +19,7 @@ dependencies = [
     "python-jose>=3.3.0",
     "passlib>=1.7.4",
     "python-multipart>=0.0.5",
-    "sqlalchemy>=2.0.0",
+    "sqlalchemy[asyncio]>=2.0.0",
     "alembic>=1.10.4",
     "aiohttp>=3.8.4",
     "cryptography>=40.0.0",
@@ -35,6 +35,9 @@ dependencies = [
     "redis>=4.6.0",  # sync & async clients used by shared cache
     "loguru>=0.7.0",
     "aiobotocore~=2.0",
+    "tiktoken>=0.5.0",  # for token counting in Claude Code support
+    "google-generativeai>=0.3.0",
+    "google-genai>=0.3.0",
 ]
 
 [project.optional-dependencies]
