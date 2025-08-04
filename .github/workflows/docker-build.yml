@@ -49,7 +49,7 @@ jobs:
         context: .
         push: true
         tags: |
-          tensorblockai/forge:latest
-          tensorblockai/forge:${{ steps.tag.outputs.tag }}
+          krytius/forge:latest
+          krytius/forge:${{ steps.tag.outputs.tag }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
